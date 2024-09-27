@@ -1,5 +1,5 @@
-
 import sys, os
+from absl import app, flags
 import numpy as np
 import cv2
 import torch
@@ -10,6 +10,8 @@ from scipy.ndimage import binary_erosion
 sys.path.insert(0, os.getcwd())
 from projects.csim.scripts import lpips_models
 from lab4d.utils.vis_utils import img2color
+from lab4d.render import get_config, construct_batch_from_opts, render_batch
+from projects.diffgs.trainer import GSplatTrainer as Trainer
 
 
 def im2tensor(image, imtype=np.uint8, cent=1., factor=1./2.):
@@ -106,16 +108,29 @@ def subsample(batch, skip_idx):
 
 
 
-def main():
+def main(_):
     seqname1 = "eagle-d-0000"
     skip_idx = 1
 
-    rgb_pred_files = "projects/diffgs/scripts/eval/temp/*.png"
+    rgb_pred_files = "projects/diffgs/scripts/eval/temp/rgb/*.png"
     depth_pred_files = "database/processed/Depth/Full-Resolution/eagle-d-0000/*.npy"
 
     rgb_gt_files = "database/processed/JPEGImages/Full-Resolution/{0}/*.jpg".format(seqname1) 
     depth_gt_files = "database/processed/Depth/Full-Resolution/{0}/*.npy".format(seqname1)
     mask_gt_files = "database/processed/Annotations/Full-Resolution/{0}/*.npy".format(seqname1)
+
+    render_res = 512
+    inst_id = 0
+
+    opts = get_config()
+    opts["render_res"] = render_res
+    opts["inst_id"] = inst_id
+    opts["load_suffix"] = "latest"
+    opts["n_depth"] = 256
+    opts["logroot"] = sys.argv[1].split("=")[1].rsplit("/", 2)[0]
+    model, data_info, ref_dict = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
+    batch, raw_size = construct_batch_from_opts(opts, model, data_info)
+    rendered = render_batch(model, batch)
 
     lpips_model = lpips_models.PerceptualLoss(model='net-lin', net='alex', use_gpu=True,version=0.1)
     
@@ -136,15 +151,15 @@ def main():
     for it, files_paths in enumerate(zip(sorted(glob.glob(rgb_gt_files))[::skip_idx], 
                                          sorted(glob.glob(depth_gt_files))[::skip_idx], 
                                          sorted(glob.glob(mask_gt_files))[::skip_idx],
-                                         sorted(glob.glob(rgb_pred_files))[::skip_idx],
-                                         sorted(glob.glob(depth_pred_files))[::skip_idx])):
+                                         rendered["rgb"][::skip_idx],
+                                         rendered["depth"][::skip_idx])):
         rgb_gt_file, depth_gt_file, mask_gt_file, rgb_pred_file, depth_pred_file = files_paths
         
         mask = np.load(mask_gt_file) > 0
         rgb_gt = cv2.imread(rgb_gt_file)[...,::-1]/255.
-        rgb_pred = cv2.imread(rgb_pred_file)[...,::-1]/255.
+        rgb_pred = rgb_pred_file #cv2.imread(rgb_pred_file)[...,::-1]/255.
         depth_gt = cv2.resize(np.load(depth_gt_file), raw_size[::-1])
-        depth_pred = cv2.resize(np.load(depth_pred_file), raw_size[::-1])
+        depth_pred = depth_pred_file[:,:,0] #cv2.resize(np.load(depth_pred_file), raw_size[::-1])
 
         depth_acc, depth_err = compute_depth_acc_at_10cm(depth_gt, depth_pred, np.ones_like(depth_gt) * 2, mask=None, dep_scale = 1)
         depth_acc_list.append(depth_acc)
@@ -174,9 +189,9 @@ def main():
         ssim_bg = compute_ssim(rgb_gt, rgb_pred, mask=~mask)
         ssim_bg_list.append(ssim_bg)
         
-        depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
-        cv2.imwrite("tmp/%05d-depth.jpg"%it, depth_vis[...,::-1]*255)
-        cv2.imwrite("tmp/%05d-rgb.jpg"%it, np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
+        # depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
+        # cv2.imwrite("tmp/%05d-depth.jpg"%it, depth_vis[...,::-1]*255)
+        # cv2.imwrite("tmp/%05d-rgb.jpg"%it, np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
     
     depth_acc_list = np.stack(depth_acc_list, 0)
     depth_acc_fg_list = np.stack(depth_acc_fg_list, 0)
@@ -206,4 +221,4 @@ def main():
     print("ssim-bg: %.3f" % ssim_bg_list.mean())
 
 if __name__ == "__main__":
-    main()
+    app.run(main)
