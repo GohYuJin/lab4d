@@ -109,18 +109,17 @@ def subsample(batch, skip_idx):
 
 
 def main(_):
-    seqname1 = "eagle-d-0000"
+    render_res = 512
+    inst_id = 3
+    seqname1 = "eagle-d-{0:04}".format(inst_id)
     skip_idx = 1
 
-    rgb_pred_files = "projects/diffgs/scripts/eval/temp/rgb/*.png"
-    depth_pred_files = "database/processed/Depth/Full-Resolution/eagle-d-0000/*.npy"
+    # rgb_pred_files = "projects/diffgs/scripts/eval/temp/rgb/*.png"
+    # depth_pred_files = "projects/diffgs/scripts/eval/temp/depth/*.npy"
 
     rgb_gt_files = "database/processed/JPEGImages/Full-Resolution/{0}/*.jpg".format(seqname1) 
     depth_gt_files = "database/processed/Depth/Full-Resolution/{0}/*.npy".format(seqname1)
     mask_gt_files = "database/processed/Annotations/Full-Resolution/{0}/*.npy".format(seqname1)
-
-    render_res = 512
-    inst_id = 0
 
     opts = get_config()
     opts["render_res"] = render_res
