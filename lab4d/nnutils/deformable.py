@@ -66,6 +66,7 @@ class Deformable(FeatureNeRF):
         init_scale=0.1,
         color_act=True,
         feature_channels=16,
+        extrinsics_type="mlp",
         use_timesync=False,
         invalid_vid=-1,
     ):
@@ -87,6 +88,7 @@ class Deformable(FeatureNeRF):
             init_scale=init_scale,
             color_act=color_act,
             feature_channels=feature_channels,
+            extrinsics_type=extrinsics_type,
             invalid_vid=invalid_vid,
         )
 
@@ -277,6 +279,8 @@ class Deformable(FeatureNeRF):
         )
         cyc_dist = (xyz_cycled - xyz_t).norm(2, -1, keepdim=True)
         cyc_dict["cyc_dist"] = cyc_dist
+        cyc_dict["l2_motion"] = ((xyz_t - xyz).norm(2, -1, keepdim=True) + \
+                            (xyz_cycled - xyz).norm(2, -1, keepdim=True)) * 0.5
         cyc_dict.update(warp_dict)
         return cyc_dict
 

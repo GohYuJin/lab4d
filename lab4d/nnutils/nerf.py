@@ -197,7 +197,8 @@ class NeRF(nn.Module):
     def construct_extrinsics(self, rtmat, frame_info, extrinsics_type):
         if extrinsics_type == "mlp":
             self.camera_mlp = CameraMLP_so3(rtmat, frame_info=frame_info)
-            # self.camera_mlp = CameraMLP(rtmat, frame_info=frame_info)
+        elif extrinsics_type == "mlp_nodelta":
+            self.camera_mlp = CameraMLP(rtmat, frame_info=frame_info)
         elif extrinsics_type == "const":
             self.camera_mlp = CameraConst(rtmat, frame_info=frame_info)
         elif extrinsics_type == "explicit":
@@ -1302,10 +1303,12 @@ class NeRF(nn.Module):
             cyc_dict (Dict): Cycle consistency loss. Keys: "cyc_dist" (M,N,D,1)
         """
         cyc_dist = torch.zeros_like(xyz[..., :1])
+        l2_motion = torch.zeros_like(xyz[..., :1])
         delta_skin = torch.zeros_like(xyz[..., :1])
         skin_entropy = torch.zeros_like(xyz[..., :1])
         cyc_dict = {
             "cyc_dist": cyc_dist,
+            "l2_motion": l2_motion,
             "delta_skin": delta_skin,
             "skin_entropy": skin_entropy,
         }
