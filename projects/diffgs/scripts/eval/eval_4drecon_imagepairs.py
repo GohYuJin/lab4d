@@ -106,11 +106,156 @@ def subsample(batch, skip_idx):
         else:
             subsample(v, skip_idx)
 
+def construct_batch_from_opts(opts, model, data_info):
+    from lab4d.utils.camera_utils import (
+        construct_batch,
+        get_fixed_cam,
+        get_object_to_camera_matrix,
+        get_orbit_camera,
+        get_rotating_cam,
+        create_field2cam,
+        get_bev_cam,
+    )
+    from lab4d.utils.geom_utils import K2inv, K2mat, mat2K
+    from lab4d.dataloader import data_utils
 
+    device = "cuda"
+    # data info
+    if "motion_id" in opts:
+        video_id = opts["motion_id"]
+    else:
+        video_id = opts["inst_id"]
+    # ref video size
+    raw_size = data_info["raw_size"][video_id]  # full range of pixels
+    # ref video length
+    vid_length = data_utils.get_vid_length(video_id, data_info)
+
+    # whether to freeze a frame
+    if opts["freeze_id"] == -1:
+        if opts["noskip"]:
+            # render all frames
+            frameid_sub = np.arange(vid_length)
+            render_length = vid_length
+        else:
+            # render filtered frames
+            frame_mapping = data_info["frame_info"]["frame_mapping"]
+            frame_offset = data_info["frame_info"]["frame_offset"]
+            frameid = frame_mapping[frame_offset[video_id] : frame_offset[video_id + 1]]
+
+            frameid_start = data_info["frame_info"]["frame_offset_raw"][video_id]
+            frameid_sub = frameid - frameid_start
+            render_length = len(frameid)
+        # remove last frame to be consistent with flow
+        frameid_sub = frameid_sub[:-1]
+        render_length = render_length - 1
+    elif opts["freeze_id"] >= 0 and opts["freeze_id"] < vid_length:
+        if opts["num_frames"] <= 0:
+            num_frames = vid_length
+        else:
+            num_frames = opts["num_frames"]
+        frameid_sub = np.asarray([opts["freeze_id"]] * num_frames)
+    else:
+        raise ValueError("frame id %d out of range" % opts["freeze_id"])
+    print("rendering frames: %s from video %d" % (str(frameid_sub), video_id))
+    frameid = frameid_sub + data_info["frame_info"]["frame_offset_raw"][video_id]
+
+    # get cameras wrt each field
+    with torch.no_grad():
+        frameid = torch.tensor(frameid, device=device)
+        field2cam_fr = model.get_cameras(frame_id=frameid)
+        intrinsics_fr = model.get_intrinsics(
+            frameid_sub + data_info["frame_info"]["frame_offset_raw"][video_id]
+        )
+        aabb = model.get_aabb(inst_id=opts["inst_id"])
+    # convert to numpy
+    for k, v in field2cam_fr.items():
+        if torch.is_tensor(v):
+            field2cam_fr[k] = v.cpu().numpy()
+        if torch.is_tensor(aabb[k]):
+            aabb[k] = aabb[k].cpu().numpy()
+    if torch.is_tensor(intrinsics_fr):
+        intrinsics_fr = intrinsics_fr.cpu().numpy()
+
+    # construct batch from user input
+    if opts["viewpoint"] == "ref":
+        # rotate around viewpoint
+        field2cam = None
+
+        # camera_int = None
+        crop2raw = np.zeros((len(frameid_sub), 4))
+        crop2raw[:, 0] = raw_size[1] / opts["render_res"]
+        crop2raw[:, 1] = raw_size[0] / opts["render_res"]
+        camera_int = mat2K(K2inv(crop2raw) @ K2mat(intrinsics_fr))
+        crop2raw = None
+    elif opts["viewpoint"].startswith("rot"):
+        # rotate around field, format: rot-evelvation-degree
+        elev, max_angle = [int(val) for val in opts["viewpoint"].split("-")[1:]]
+
+        # bg_to_cam
+        obj_size = (aabb["fg"][0, 1, :] - aabb["fg"][0, 0, :]).max()
+        cam_traj = get_rotating_cam(
+            len(frameid_sub), distance=obj_size * 2.5, max_angle=max_angle
+        )
+        cam_elev = get_object_to_camera_matrix(elev, [1, 0, 0], 0)[None]
+        cam_traj = cam_traj @ cam_elev
+        field2cam = create_field2cam(cam_traj, field2cam_fr.keys())
+
+        camera_int = np.zeros((len(frameid_sub), 4))
+
+        # focal length = img height * distance / obj height
+        camera_int[:, :2] = opts["render_res"] * 2 * 0.8  # zoom out a bit
+        camera_int[:, 2:] = opts["render_res"] / 2
+        raw_size = (640, 640)  # full range of pixels
+        crop2raw = None
+    elif opts["viewpoint"].startswith("bev"):
+        elev = int(opts["viewpoint"].split("-")[1])
+        # render bird's eye view
+        if "bg" in field2cam_fr.keys():
+            # get bev wrt first frame image
+            # center_to_bev = centered_to_camt0 x centered_to_rotated x camt0_to_centered x bg_to_camt0
+            center_to_bev = get_object_to_camera_matrix(elev, [1, 0, 0], 0)[None]
+            camt0_to_center = np.eye(4)
+            camt0_to_center[2, 3] = -field2cam_fr["bg"][0, 2, 3]
+            camt0_to_bev = (
+                np.linalg.inv(camt0_to_center) @ center_to_bev @ camt0_to_center
+            )
+            bg2bev = camt0_to_bev @ field2cam_fr["bg"][:1]
+            # push cameras away
+            bg2bev[..., 2, 3] *= 3
+            field2cam = {"bg": np.tile(bg2bev, (render_length, 1, 1))}
+            if "fg" in field2cam_fr.keys():
+                # if both fg and bg
+                camt2bg = np.linalg.inv(field2cam_fr["bg"])
+                fg2camt = field2cam_fr["fg"]
+                field2cam["fg"] = field2cam["bg"] @ camt2bg @ fg2camt
+        elif "fg" in field2cam_fr.keys():
+            # if only fg
+            field2cam = {"fg": get_bev_cam(field2cam_fr["fg"], elev=elev)}
+        else:
+            raise NotImplementedError
+
+        camera_int = np.zeros((len(frameid_sub), 4))
+        camera_int[:, :2] = opts["render_res"] * 2
+        camera_int[:, 2:] = opts["render_res"] / 2
+        raw_size = (640, 640)  # full range of pixels
+        crop2raw = None
+    else:
+        raise ValueError("Unknown viewpoint type %s" % opts.viewpoint)
+
+    batch = construct_batch(
+        inst_id=opts["inst_id"],
+        frameid_sub=frameid_sub,
+        eval_res=opts["render_res"],
+        field2cam=field2cam,
+        camera_int=camera_int,
+        crop2raw=crop2raw,
+        device=device,
+    )
+    return batch, raw_size
 
 def main(_):
     render_res = 512
-    inst_id = 3
+    inst_id = 0
     seqname1 = "eagle-d-{0:04}".format(inst_id)
     skip_idx = 1
 
@@ -128,12 +273,43 @@ def main(_):
     opts["n_depth"] = 256
     opts["logroot"] = sys.argv[1].split("=")[1].rsplit("/", 2)[0]
     model, data_info, ref_dict = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
-    batch, raw_size = construct_batch_from_opts(opts, model, data_info)
-    rendered = render_batch(model, batch)
+    
+    opts["seqname"] = "eagle-d"
+    opts["logname"] = "diffgs-fs-view_n0123_fg-b4-bob-r120-const"
+    model2, data_info2, _ = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
+
+    batch, raw_size = construct_batch_from_opts(opts, model2, data_info2)
+    from lab4d.utils.quat_transform import se3_to_quaternion_translation
+    from lab4d.utils.geom_utils import K2inv, K2mat, mat2K
+    from lab4d.render import batch_to_flow_batch
+
+    batch = batch_to_flow_batch(batch)
+    model2.process_frameid(batch)
+    model2.reshape_batch_inv(batch)
+    crop_size = model2.config["render_res"]
+    Kmat, w2c = model2.compute_camera_samples(batch, crop_size)
+    frameid = batch["frameid"]
+    batch["dataid"] = batch["dataid"] * 0
+    frameid = frameid % (data_info2["frame_info"]["frame_offset"][inst_id + 1] - 
+                                    data_info2["frame_info"]["frame_offset"][inst_id])
+
+    model2.gaussians.update_trajectory(frameid)
+    model.gaussians.update_trajectory(frameid)
+
+    rendered, _ = model.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
+    for k, v in rendered.items():
+        rendered[k] = v[:, 0].detach()
+    rendered = model.rendered_to_output(rendered, return_numpy=True)
+
+    rendered_pair, _ = model2.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
+    for k, v in rendered_pair.items():
+        rendered_pair[k] = v[:, 0].detach()
+    rendered_pair = model.rendered_to_output(rendered_pair, return_numpy=True)
+    cv2.imwrite("tmp/other_sample_rgb_pred.png", 
+                cv2.cvtColor((rendered_pair["rgb"][-1]*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+
 
     lpips_model = lpips_models.PerceptualLoss(model='net-lin', net='alex', use_gpu=True,version=0.1)
-    
-    raw_size = (512, 512)
 
     lpips_list = []
     lpips_bg_list = []
@@ -218,6 +394,9 @@ def main(_):
     print("ssim: %.3f" % ssim_list.mean())
     print("ssim-fg: %.3f" % ssim_fg_list.mean())
     print("ssim-bg: %.3f" % ssim_bg_list.mean())
+
+    cv2.imwrite("tmp/sample_rgb_pred.png", 
+                cv2.cvtColor((rgb_pred*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
 if __name__ == "__main__":
     app.run(main)
