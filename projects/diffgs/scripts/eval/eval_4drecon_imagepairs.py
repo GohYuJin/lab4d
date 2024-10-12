@@ -12,6 +12,7 @@ from projects.csim.scripts import lpips_models
 from lab4d.utils.vis_utils import img2color
 from lab4d.render import get_config, construct_batch_from_opts, render_batch
 from projects.diffgs.trainer import GSplatTrainer as Trainer
+from lab4d.render import batch_to_flow_batch
 
 
 def im2tensor(image, imtype=np.uint8, cent=1., factor=1./2.):
@@ -106,182 +107,39 @@ def subsample(batch, skip_idx):
         else:
             subsample(v, skip_idx)
 
-def construct_batch_from_opts(opts, model, data_info):
-    from lab4d.utils.camera_utils import (
-        construct_batch,
-        get_fixed_cam,
-        get_object_to_camera_matrix,
-        get_orbit_camera,
-        get_rotating_cam,
-        create_field2cam,
-        get_bev_cam,
-    )
-    from lab4d.utils.geom_utils import K2inv, K2mat, mat2K
-    from lab4d.dataloader import data_utils
-
-    device = "cuda"
-    # data info
-    if "motion_id" in opts:
-        video_id = opts["motion_id"]
-    else:
-        video_id = opts["inst_id"]
-    # ref video size
-    raw_size = data_info["raw_size"][video_id]  # full range of pixels
-    # ref video length
-    vid_length = data_utils.get_vid_length(video_id, data_info)
-
-    # whether to freeze a frame
-    if opts["freeze_id"] == -1:
-        if opts["noskip"]:
-            # render all frames
-            frameid_sub = np.arange(vid_length)
-            render_length = vid_length
-        else:
-            # render filtered frames
-            frame_mapping = data_info["frame_info"]["frame_mapping"]
-            frame_offset = data_info["frame_info"]["frame_offset"]
-            frameid = frame_mapping[frame_offset[video_id] : frame_offset[video_id + 1]]
-
-            frameid_start = data_info["frame_info"]["frame_offset_raw"][video_id]
-            frameid_sub = frameid - frameid_start
-            render_length = len(frameid)
-        # remove last frame to be consistent with flow
-        frameid_sub = frameid_sub[:-1]
-        render_length = render_length - 1
-    elif opts["freeze_id"] >= 0 and opts["freeze_id"] < vid_length:
-        if opts["num_frames"] <= 0:
-            num_frames = vid_length
-        else:
-            num_frames = opts["num_frames"]
-        frameid_sub = np.asarray([opts["freeze_id"]] * num_frames)
-    else:
-        raise ValueError("frame id %d out of range" % opts["freeze_id"])
-    print("rendering frames: %s from video %d" % (str(frameid_sub), video_id))
-    frameid = frameid_sub + data_info["frame_info"]["frame_offset_raw"][video_id]
-
-    # get cameras wrt each field
-    with torch.no_grad():
-        frameid = torch.tensor(frameid, device=device)
-        field2cam_fr = model.get_cameras(frame_id=frameid)
-        intrinsics_fr = model.get_intrinsics(
-            frameid_sub + data_info["frame_info"]["frame_offset_raw"][video_id]
-        )
-        aabb = model.get_aabb(inst_id=opts["inst_id"])
-    # convert to numpy
-    for k, v in field2cam_fr.items():
-        if torch.is_tensor(v):
-            field2cam_fr[k] = v.cpu().numpy()
-        if torch.is_tensor(aabb[k]):
-            aabb[k] = aabb[k].cpu().numpy()
-    if torch.is_tensor(intrinsics_fr):
-        intrinsics_fr = intrinsics_fr.cpu().numpy()
-
-    # construct batch from user input
-    if opts["viewpoint"] == "ref":
-        # rotate around viewpoint
-        field2cam = None
-
-        # camera_int = None
-        crop2raw = np.zeros((len(frameid_sub), 4))
-        crop2raw[:, 0] = raw_size[1] / opts["render_res"]
-        crop2raw[:, 1] = raw_size[0] / opts["render_res"]
-        camera_int = mat2K(K2inv(crop2raw) @ K2mat(intrinsics_fr))
-        crop2raw = None
-    elif opts["viewpoint"].startswith("rot"):
-        # rotate around field, format: rot-evelvation-degree
-        elev, max_angle = [int(val) for val in opts["viewpoint"].split("-")[1:]]
-
-        # bg_to_cam
-        obj_size = (aabb["fg"][0, 1, :] - aabb["fg"][0, 0, :]).max()
-        cam_traj = get_rotating_cam(
-            len(frameid_sub), distance=obj_size * 2.5, max_angle=max_angle
-        )
-        cam_elev = get_object_to_camera_matrix(elev, [1, 0, 0], 0)[None]
-        cam_traj = cam_traj @ cam_elev
-        field2cam = create_field2cam(cam_traj, field2cam_fr.keys())
-
-        camera_int = np.zeros((len(frameid_sub), 4))
-
-        # focal length = img height * distance / obj height
-        camera_int[:, :2] = opts["render_res"] * 2 * 0.8  # zoom out a bit
-        camera_int[:, 2:] = opts["render_res"] / 2
-        raw_size = (640, 640)  # full range of pixels
-        crop2raw = None
-    elif opts["viewpoint"].startswith("bev"):
-        elev = int(opts["viewpoint"].split("-")[1])
-        # render bird's eye view
-        if "bg" in field2cam_fr.keys():
-            # get bev wrt first frame image
-            # center_to_bev = centered_to_camt0 x centered_to_rotated x camt0_to_centered x bg_to_camt0
-            center_to_bev = get_object_to_camera_matrix(elev, [1, 0, 0], 0)[None]
-            camt0_to_center = np.eye(4)
-            camt0_to_center[2, 3] = -field2cam_fr["bg"][0, 2, 3]
-            camt0_to_bev = (
-                np.linalg.inv(camt0_to_center) @ center_to_bev @ camt0_to_center
-            )
-            bg2bev = camt0_to_bev @ field2cam_fr["bg"][:1]
-            # push cameras away
-            bg2bev[..., 2, 3] *= 3
-            field2cam = {"bg": np.tile(bg2bev, (render_length, 1, 1))}
-            if "fg" in field2cam_fr.keys():
-                # if both fg and bg
-                camt2bg = np.linalg.inv(field2cam_fr["bg"])
-                fg2camt = field2cam_fr["fg"]
-                field2cam["fg"] = field2cam["bg"] @ camt2bg @ fg2camt
-        elif "fg" in field2cam_fr.keys():
-            # if only fg
-            field2cam = {"fg": get_bev_cam(field2cam_fr["fg"], elev=elev)}
-        else:
-            raise NotImplementedError
-
-        camera_int = np.zeros((len(frameid_sub), 4))
-        camera_int[:, :2] = opts["render_res"] * 2
-        camera_int[:, 2:] = opts["render_res"] / 2
-        raw_size = (640, 640)  # full range of pixels
-        crop2raw = None
-    else:
-        raise ValueError("Unknown viewpoint type %s" % opts.viewpoint)
-
-    batch = construct_batch(
-        inst_id=opts["inst_id"],
-        frameid_sub=frameid_sub,
-        eval_res=opts["render_res"],
-        field2cam=field2cam,
-        camera_int=camera_int,
-        crop2raw=crop2raw,
-        device=device,
-    )
-    return batch, raw_size
 
 def main(_):
     render_res = 512
     inst_id = 0
     seqname1 = "eagle-d-{0:04}".format(inst_id)
     skip_idx = 1
-
-    # rgb_pred_files = "projects/diffgs/scripts/eval/temp/rgb/*.png"
-    # depth_pred_files = "projects/diffgs/scripts/eval/temp/depth/*.npy"
+    metrics_log_path = "projects/diffgs/scripts/eval/metrics.csv"
+    output_file = open(metrics_log_path, "a")
 
     rgb_gt_files = "database/processed/JPEGImages/Full-Resolution/{0}/*.jpg".format(seqname1) 
     depth_gt_files = "database/processed/Depth/Full-Resolution/{0}/*.npy".format(seqname1)
     mask_gt_files = "database/processed/Annotations/Full-Resolution/{0}/*.npy".format(seqname1)
 
     opts = get_config()
+    original_logname = opts["logname"]
+    original_seqname = opts["seqname"]
+
     opts["render_res"] = render_res
     opts["inst_id"] = inst_id
     opts["load_suffix"] = "latest"
     opts["n_depth"] = 256
     opts["logroot"] = sys.argv[1].split("=")[1].rsplit("/", 2)[0]
-    model, data_info, ref_dict = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
-    
+    # specify model that has been trained on all the views (instance_id will refer to camera 
+    # instances with respect to this model)
     opts["seqname"] = "eagle-d"
     opts["logname"] = "diffgs-fs-view_n0123_fg-b4-bob-r120-const"
     model2, data_info2, _ = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
 
+    opts["seqname"] = original_seqname
+    opts["logname"] = original_logname
+    model, data_info, ref_dict = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
+    
     batch, raw_size = construct_batch_from_opts(opts, model2, data_info2)
-    from lab4d.utils.quat_transform import se3_to_quaternion_translation
-    from lab4d.utils.geom_utils import K2inv, K2mat, mat2K
-    from lab4d.render import batch_to_flow_batch
 
     batch = batch_to_flow_batch(batch)
     model2.process_frameid(batch)
@@ -291,16 +149,16 @@ def main(_):
     frameid = batch["frameid"]
     batch["dataid"] = batch["dataid"] * 0
     frameid = frameid % (data_info2["frame_info"]["frame_offset"][inst_id + 1] - 
-                                    data_info2["frame_info"]["frame_offset"][inst_id])
+                        data_info2["frame_info"]["frame_offset"][inst_id])
 
-    model2.gaussians.update_trajectory(frameid)
     model.gaussians.update_trajectory(frameid)
-
     rendered, _ = model.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
     for k, v in rendered.items():
         rendered[k] = v[:, 0].detach()
     rendered = model.rendered_to_output(rendered, return_numpy=True)
 
+    model2.gaussians.update_trajectory(frameid)
+    
     rendered_pair, _ = model2.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
     for k, v in rendered_pair.items():
         rendered_pair[k] = v[:, 0].detach()
@@ -308,21 +166,12 @@ def main(_):
     cv2.imwrite("tmp/other_sample_rgb_pred.png", 
                 cv2.cvtColor((rendered_pair["rgb"][-1]*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
-
     lpips_model = lpips_models.PerceptualLoss(model='net-lin', net='alex', use_gpu=True,version=0.1)
 
-    lpips_list = []
-    lpips_bg_list = []
-    lpips_fg_list = []
-    psnr_list = []
-    psnr_bg_list = []
-    psnr_fg_list = []
-    ssim_list = []
-    ssim_bg_list = []
-    ssim_fg_list = []
-    depth_acc_list = []
-    depth_acc_bg_list = []
-    depth_acc_fg_list = []
+    lpips_list, lpips_bg_list, lpips_fg_list = [], [], []
+    psnr_list, psnr_bg_list, psnr_fg_list = [], [], []
+    ssim_list, ssim_bg_list, ssim_fg_list = [], [], []
+    depth_acc_list, depth_acc_bg_list, depth_acc_fg_list = [], [], []
     for it, files_paths in enumerate(zip(sorted(glob.glob(rgb_gt_files))[::skip_idx], 
                                          sorted(glob.glob(depth_gt_files))[::skip_idx], 
                                          sorted(glob.glob(mask_gt_files))[::skip_idx],
@@ -363,11 +212,22 @@ def main(_):
         ssim_fg_list.append(ssim_fg)
         ssim_bg = compute_ssim(rgb_gt, rgb_pred, mask=~mask)
         ssim_bg_list.append(ssim_bg)
+
+        output_file.write(",".join([str(i) for i in [
+            original_seqname + original_logname, 
+            inst_id,
+            it, 
+            depth_acc_fg, 
+            lpips_fg, 
+            psnr_fg, 
+            ssim_fg
+        ]]) + "\n")
         
         # depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
         # cv2.imwrite("tmp/%05d-depth.jpg"%it, depth_vis[...,::-1]*255)
         # cv2.imwrite("tmp/%05d-rgb.jpg"%it, np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
-    
+    output_file.close()
+
     depth_acc_list = np.stack(depth_acc_list, 0)
     depth_acc_fg_list = np.stack(depth_acc_fg_list, 0)
     depth_acc_bg_list = np.stack(depth_acc_bg_list, 0)
