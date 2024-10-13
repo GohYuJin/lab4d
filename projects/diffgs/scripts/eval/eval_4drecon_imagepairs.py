@@ -109,6 +109,10 @@ def subsample(batch, skip_idx):
 
 
 def main(_):
+    # We will use the instrinsics and extrinsics stored within the model trained with all views
+    all_views_model_seqname = "eagle-d"
+    all_views_model_logname = "diffgs-fs-view_n0123_fg-b4-bob-r120-const"
+
     opts = get_config()
     render_res = 512
     inst_id = opts["inst_id"]
@@ -132,8 +136,8 @@ def main(_):
     opts["logroot"] = sys.argv[1].split("=")[1].rsplit("/", 2)[0]
     # specify model that has been trained on all the views (instance_id will refer to camera 
     # instances with respect to this model)
-    opts["seqname"] = "eagle-d"
-    opts["logname"] = "diffgs-fs-view_n0123_fg-b4-bob-r120-const"
+    opts["seqname"] = all_views_model_seqname
+    opts["logname"] = all_views_model_logname
     model2, data_info2, _ = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
 
     opts["seqname"] = original_seqname
