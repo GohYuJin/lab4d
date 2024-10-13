@@ -13,6 +13,7 @@ from lab4d.utils.vis_utils import img2color
 from lab4d.render import get_config, construct_batch_from_opts, render_batch
 from projects.diffgs.trainer import GSplatTrainer as Trainer
 from lab4d.render import batch_to_flow_batch
+from lab4d.utils.geom_utils import K2mat
 
 
 def im2tensor(image, imtype=np.uint8, cent=1., factor=1./2.):
@@ -114,6 +115,7 @@ def main(_):
     render_res = 512
     inst_id = opts["inst_id"]
     skip_idx = 1
+    save_debug_imgs = True
     metrics_log_path = "projects/diffgs/scripts/eval/metrics.csv"
     output_file = open(metrics_log_path, "a")
 
@@ -146,8 +148,6 @@ def main(_):
     model.reshape_batch_inv(batch)
     crop_size = model.config["render_res"]
     frameid = batch["frameid"]
-
-    from lab4d.utils.geom_utils import K2mat
 
     raw_size = data_info["raw_size"][opts["inst_id"]]
     intrinsics_fr = torch.tensor([512, 512, 256, 256], device=model.device)
@@ -221,9 +221,6 @@ def main(_):
             ssim_fg
         ]]) + "\n")
         
-        # depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
-        # cv2.imwrite("tmp/%05d-depth.jpg"%it, depth_vis[...,::-1]*255)
-        # cv2.imwrite("tmp/%05d-rgb.jpg"%it, np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
     output_file.close()
 
     depth_acc_list = np.stack(depth_acc_list, 0)
@@ -253,8 +250,10 @@ def main(_):
     print("ssim-fg: %.3f" % ssim_fg_list.mean())
     print("ssim-bg: %.3f" % ssim_bg_list.mean())
 
-    cv2.imwrite("tmp/sample_rgb_pred.png", 
-                cv2.cvtColor((rgb_pred*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+    if save_debug_imgs:
+        depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
+        cv2.imwrite("tmp/sample-depth.jpg", depth_vis[...,::-1]*255)
+        cv2.imwrite("tmp/sample-rgb.jpg", np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
 
 if __name__ == "__main__":
     app.run(main)
