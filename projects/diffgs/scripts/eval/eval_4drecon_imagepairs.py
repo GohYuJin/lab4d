@@ -109,8 +109,9 @@ def subsample(batch, skip_idx):
 
 
 def main(_):
+    opts = get_config()
     render_res = 512
-    inst_id = 0
+    inst_id = opts["inst_id"]
     seqname1 = "eagle-d-{0:04}".format(inst_id)
     skip_idx = 1
     metrics_log_path = "projects/diffgs/scripts/eval/metrics.csv"
@@ -120,7 +121,6 @@ def main(_):
     depth_gt_files = "database/processed/Depth/Full-Resolution/{0}/*.npy".format(seqname1)
     mask_gt_files = "database/processed/Annotations/Full-Resolution/{0}/*.npy".format(seqname1)
 
-    opts = get_config()
     original_logname = opts["logname"]
     original_seqname = opts["seqname"]
 
