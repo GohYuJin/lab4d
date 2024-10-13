@@ -114,6 +114,7 @@ def main(_):
     inst_id = opts["inst_id"]
     seqname1 = "eagle-d-{0:04}".format(inst_id)
     skip_idx = 1
+    save_debug_imgs = True
     metrics_log_path = "projects/diffgs/scripts/eval/metrics.csv"
     output_file = open(metrics_log_path, "a")
 
@@ -159,13 +160,6 @@ def main(_):
 
     model2.gaussians.update_trajectory(frameid)
     
-    rendered_pair, _ = model2.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
-    for k, v in rendered_pair.items():
-        rendered_pair[k] = v[:, 0].detach()
-    rendered_pair = model.rendered_to_output(rendered_pair, return_numpy=True)
-    cv2.imwrite("tmp/other_sample_rgb_pred.png", 
-                cv2.cvtColor((rendered_pair["rgb"][-1]*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
-
     lpips_model = lpips_models.PerceptualLoss(model='net-lin', net='alex', use_gpu=True,version=0.1)
 
     lpips_list, lpips_bg_list, lpips_fg_list = [], [], []
@@ -223,9 +217,6 @@ def main(_):
             ssim_fg
         ]]) + "\n")
         
-        # depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
-        # cv2.imwrite("tmp/%05d-depth.jpg"%it, depth_vis[...,::-1]*255)
-        # cv2.imwrite("tmp/%05d-rgb.jpg"%it, np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
     output_file.close()
 
     depth_acc_list = np.stack(depth_acc_list, 0)
@@ -255,8 +246,17 @@ def main(_):
     print("ssim-fg: %.3f" % ssim_fg_list.mean())
     print("ssim-bg: %.3f" % ssim_bg_list.mean())
 
-    cv2.imwrite("tmp/sample_rgb_pred.png", 
-                cv2.cvtColor((rgb_pred*255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+    if save_debug_imgs:
+        rendered_pair, _ = model2.render_pair(crop_size, Kmat, w2c=w2c, frameid=frameid)
+        for k, v in rendered_pair.items():
+            rendered_pair[k] = v[:, 0].detach()
+        rendered_pair = model2.rendered_to_output(rendered_pair, return_numpy=True)
+        
+        depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
+        cv2.imwrite("tmp/sample-depth.jpg", depth_vis[...,::-1]*255)
+        cv2.imwrite("tmp/sample-rgb.jpg", np.concatenate([rgb_gt, rgb_pred, rendered_pair["rgb"][-1]], axis=0)[...,::-1]*255)
+
+
 
 if __name__ == "__main__":
     app.run(main)
