@@ -111,8 +111,9 @@ def subsample(batch, skip_idx):
 
 def main(_):
     opts = get_config()
+    intrinsics = [512, 512, 256, 256] #[1152, 1152, 576, 512] #[1600, 1600, 800, 600] #
 
-    render_res = 512
+    render_res = intrinsics[0] # for convienience, please set to max of im(h,w) #1152
     inst_id = opts["inst_id"]
     skip_idx = 1
     save_debug_imgs = True
@@ -124,7 +125,7 @@ def main(_):
     ssim_list, ssim_bg_list, ssim_fg_list = [], [], []
     depth_acc_list, depth_acc_bg_list, depth_acc_fg_list = [], [], []
 
-    seqname1 = "eagle-d-{0:04}".format(inst_id)
+    seqname1 = opts["seqname"] + "-{0:04}".format(inst_id)
 
     rgb_gt_files = "database/processed/JPEGImages/Full-Resolution/{0}/*.jpg".format(seqname1) 
     depth_gt_files = "database/processed/Depth/Full-Resolution/{0}/*.npy".format(seqname1)
@@ -137,11 +138,11 @@ def main(_):
     opts["inst_id"] = 0 
     opts["render_res"] = render_res
     opts["load_suffix"] = "latest"
-    opts["n_depth"] = 256
+    # opts["n_depth"] = 256
     opts["logroot"] = sys.argv[1].split("=")[1].rsplit("/", 2)[0]
 
     model, data_info, _ = Trainer.construct_test_model(opts, force_reload=False, return_refs=False)
-
+    
     batch, raw_size = construct_batch_from_opts(opts, model, data_info)
     batch = batch_to_flow_batch(batch)
     model.process_frameid(batch)
@@ -150,7 +151,7 @@ def main(_):
     frameid = batch["frameid"]
 
     raw_size = data_info["raw_size"][opts["inst_id"]]
-    intrinsics_fr = torch.tensor([512, 512, 256, 256], device=model.device)
+    intrinsics_fr = torch.tensor(intrinsics, device=model.device)
     intrinsics_fr = intrinsics_fr[None].repeat(len(extrinsics_from_file), 
                                                1).view(len(extrinsics_from_file), 
                                                        4)
@@ -179,9 +180,9 @@ def main(_):
         
         mask = np.load(mask_gt_file) > 0
         rgb_gt = cv2.imread(rgb_gt_file)[...,::-1]/255.
-        rgb_pred = rgb_pred_file #cv2.imread(rgb_pred_file)[...,::-1]/255.
-        depth_gt = cv2.resize(np.load(depth_gt_file), raw_size[::-1])
-        depth_pred = depth_pred_file[:,:,0] #cv2.resize(np.load(depth_pred_file), raw_size[::-1])
+        rgb_pred = rgb_pred_file[0:rgb_gt.shape[0], 0:rgb_gt.shape[1]] #cv2.imread(rgb_pred_file)[...,::-1]/255.
+        depth_gt = cv2.resize(np.load(depth_gt_file).astype(np.float32), raw_size[::-1])
+        depth_pred = depth_pred_file[0:depth_gt.shape[0], 0:depth_gt.shape[1],0] #cv2.resize(np.load(depth_pred_file), raw_size[::-1])
 
         depth_acc, depth_err = compute_depth_acc_at_10cm(depth_gt, depth_pred, np.ones_like(depth_gt) * 2, mask=None, dep_scale = 1)
         depth_acc_list.append(depth_acc)
@@ -190,6 +191,7 @@ def main(_):
         depth_acc_bg, _ = compute_depth_acc_at_10cm(depth_gt, depth_pred, np.ones_like(depth_gt) * 2, mask=~mask, dep_scale = 1)
         depth_acc_bg_list.append(depth_acc_bg)
 
+        print(rgb_gt.shape, rgb_pred.shape)
         lpips = compute_lpips(rgb_gt, rgb_pred, lpips_model, mask=None)
         lpips_list.append(lpips)
         lpips_fg = compute_lpips(rgb_gt, rgb_pred, lpips_model, mask=mask)
@@ -253,6 +255,7 @@ def main(_):
     if save_debug_imgs:
         depth_vis = img2color("depth", np.concatenate([depth_gt, depth_pred, depth_err], axis=0)[...,None])
         cv2.imwrite("tmp/sample-depth.jpg", depth_vis[...,::-1]*255)
+        cv2.imwrite("tmp/sample-mask.jpg", mask*255)
         cv2.imwrite("tmp/sample-rgb.jpg", np.concatenate([rgb_gt, rgb_pred], axis=0)[...,::-1]*255)
 
 if __name__ == "__main__":

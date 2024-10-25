@@ -179,9 +179,9 @@ def main(_):
         
         mask = np.load(mask_gt_file) > 0
         rgb_gt = cv2.imread(rgb_gt_file)[...,::-1]/255.
-        rgb_pred = rgb_pred_file #cv2.imread(rgb_pred_file)[...,::-1]/255.
-        depth_gt = cv2.resize(np.load(depth_gt_file), raw_size[::-1])
-        depth_pred = depth_pred_file[:,:,0] #cv2.resize(np.load(depth_pred_file), raw_size[::-1])
+        rgb_pred = rgb_pred_file[0:rgb_gt.shape[0], 0:rgb_gt.shape[1]] #cv2.imread(rgb_pred_file)[...,::-1]/255.
+        depth_gt = cv2.resize(np.load(depth_gt_file).astype(np.float32), raw_size[::-1])
+        depth_pred = depth_pred_file[0:depth_gt.shape[0], 0:depth_gt.shape[1],0] #cv2.resize(np.load(depth_pred_file), raw_size[::-1])
 
         depth_acc, depth_err = compute_depth_acc_at_10cm(depth_gt, depth_pred, np.ones_like(depth_gt) * 2, mask=None, dep_scale = 1)
         depth_acc_list.append(depth_acc)
